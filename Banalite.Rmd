@@ -1,0 +1,243 @@
+---
+title: "Partitionnement de la diversité par groupes d'espèces"
+output:
+  html_document:
+    toc: yes
+    toc_float: yes
+  pdf_document:
+    toc: yes
+---
+
+```{r DoNotModify, include=FALSE}
+### Utilities. Do not modify.
+# Installation of packages if necessary
+InstallPackages <- function(Packages) {
+  InstallPackage <- function(Package) {
+    if (!Package %in% installed.packages()[, 1]) {
+      install.packages(Package, repos="https://cran.rstudio.com/")
+    }
+  }
+  invisible(sapply(Packages, InstallPackage))
+}
+# Basic packages
+InstallPackages(c("rmarkdown", "formatR", "kableExtra", "ragg"))
+library("kableExtra") # Mandatory to load css and more
+# Chunk font size hook: allows size='small' or any valid Latex font size in chunk options
+def.chunk.hook  <- knitr::knit_hooks$get("chunk")
+knitr::knit_hooks$set(chunk = function(x, options) {
+  x <- def.chunk.hook(x, options)
+  ifelse(options$size != "normalsize", paste0("\n \\", options$size,"\n\n", x, "\n\n \\normalsize"), x)
+})
+```
+
+```{r Options, include=FALSE}
+### Customized options for this document
+# Add necessary packages here
+Packages <- c("entropart", "rdiversity",  "tidyverse")
+# Install them
+InstallPackages(Packages)
+# knitr options
+knitr::opts_chunk$set(
+  cache=FALSE, # Cache chunk results
+  echo = TRUE, # Show R chunks
+  warning=FALSE, # Hide warnings
+  # Books only: figures with side captions
+  # fig.env='SCfigure', fig.asp=.75,
+  # Figure alignment and size
+  fig.align='center', out.width='80%',
+  # Graphic device
+  dev = "ragg_png",
+  # Code chunk format
+  tidy=FALSE, tidy.opts=list(blank=FALSE, width.cutoff=80),
+  size="scriptsize", knitr.graphics.auto_pdf = TRUE
+  )
+options(width=80)
+# ggplot style
+library("tidyverse")
+theme_set(theme_bw())
+theme_update(panel.background=element_rect(fill="transparent", colour=NA),
+             plot.background=element_rect(fill="transparent", colour=NA))
+knitr::opts_chunk$set(dev.args=list(bg="transparent"))
+# Random seed
+set.seed(1)
+```
+
+# Génération des données
+
+Soit une communauté de 5 espèces en deux groupes :
+
+- groupe A
+```{r}
+3 %>%  # 3 espèces
+  runif(min = 0.5, max = 100.5) %>% # Abondance entre 1 et 100
+  round ->
+  A
+```
+
+- groupe B
+```{r}
+2 %>%  # 2 espèces
+  runif(min = 0.5, max = 100.5) %>% # Abondance entre 1 et 100
+  round ->
+  B
+```
+
+La communauté entière est composée de A et B.
+```{r}
+C <- c(A, B)
+# Tableau des données
+tibble(
+  Espece = paste0("sp_", seq_len(length(C))),
+  Abondance = c(A,B),
+  Groupe = c(rep("A", length(A)), rep("B", length(B))),
+  Ps = c(A,B)/sum(c(A,B)),    # Proba dans la communauté
+  Psg = c(A/sum(A), B/sum(B)) # Proba dans le groupe
+) %>% 
+  print -> 
+  Communaute
+```
+Le poids de chaque groupe est son nombre d'individus (mais tout ce qui suit est vrai pour des poids arbitraires).
+
+```{r}
+Communaute %>%
+  arrange(desc(Abondance)) %>%
+  mutate(Rang = 1:n()) %>%
+  ggplot(aes(Rang, Abondance)) +
+  geom_segment(aes(xend = Rang, yend = 0), size = 1, color = 'darkgrey') +
+  geom_point(aes(color = Groupe), size = 3) +
+  labs(title="Diagramme rang-abondance de la communauté")
+```
+
+## Entropie, diversité, banalité
+
+L'entropie de la communauté est l'information moyenne apportée par les individus, c'est-à-dire la moyenne pondérée des logarithmes des raretés des espèces.
+```{r}
+library("entropart")
+# Choix de l'ordre
+q <- 1.5
+
+# Entropie
+C %>% 
+  as.ProbaVector %>%   # sum(C)/C et typage
+  `^`(-1) %>%          # Inverse
+  lnq(q) %>%           # Logarithme d'ordre q
+  weighted.mean(w=C)   # Moyenne généralisée
+# Vérification
+Tsallis(as.ProbaVector(C), q)
+```
+
+La banalité de la communauté est la moyenne généralisée des banalités des individus, c'est-à-dire la moyenne généralisée pondérée des banalités (ici : des probabilités, mais on peut définir la banalité en prenant en compte les espèces voisines) des espèces.
+C'est aussi l'inverse de la diversité.
+
+La diversité est un nombre effectif d'espèces, c'est-à-dire le nombre d'espèces équiprobables dont l'entropie est celle des données.
+La banalité est la probabilité de toutes ces espèces équiprobables.
+
+```{r}
+# Banalité
+library("rdiversity")
+C %>% 
+  as.ProbaVector %>%                  # Probabilité = banalité
+  power_mean(order=q-1, weights=C) -> # Moyenne généralisée
+  C_banalite
+
+# Vérification 
+C %>% 
+  as.ProbaVector %>%   # Probabilités pour empêcher l'estimation asymptotique
+  Diversity(q) %>%     # Nombre de Hill
+  print %>%            # Affichage de la diversité
+  `^`(-1)              # Inverse
+```
+
+Fonction pour calculer la banalité:
+```{r}
+Ordinariness <- function(NorP, q) {
+  NorP %>% 
+  as.ProbaVector %>%                  # Probabilité = banalité
+  power_mean(order=q-1, weights=NorP) # Moyenne généralisée
+}
+# Vérification
+Ordinariness(C, q)
+```
+
+
+# Décomposition
+
+## Décomposition de l'entropie
+
+L'entropie de la communauté (appelée $\gamma$) est la moyenne des entropies des groupes (appelée $\alpha$) *plus* l'entropie $\beta$, qui se comprend comme l'information supplémentaire obtenue par la connaissance de la composition des groupes en plus de la composition globale.
+```{r, tidy=TRUE}
+# Entropie totale
+Tsallis(as.ProbaVector(C), q)
+# Entropie de A et B
+A_ent_alpha <- Tsallis(as.ProbaVector(A), q)
+B_ent_alpha <- Tsallis(as.ProbaVector(B), q)
+# Entropie moyenne (=alpha)
+(ent_alpha <- weighted.mean(c(A_ent_alpha, B_ent_alpha), w=c(sum(A), sum(B))))
+# Entropie beta
+(ent_beta <- Tsallis(as.ProbaVector(C), q) - ent_alpha)
+```
+La contribution de chaque groupe à l'entropie totale est complétée par l'entropie $\beta$, qui décrit à quel point chaque groupe est différent de l'ensemble.
+Chaque groupe a sa part d'entropie $\beta$, notée $^{q}_{g}\!H_{\beta}$.
+L'entropie $\beta$ est la moyenne pondérée des $^{q}_{g}\!H_{\beta}$ comme l'entropie $\alpha$ est la moyenne pondérée des entropies de chaque groupe.
+
+$$^{q}_{g}\!H_{\beta} = \sum_s{p_{s|g}\left(\ln_q\frac{1}{p_s}-\ln_q\frac{1}{p_{s|g}}\right)}$$
+$p_{s|g}$ est la probabilité de l'espèce $s$ dans le groupe $g$, $p_{s}$ sa probabilité dans la communauté.
+Le deuxième terme de la parenthèse correspond à l'entropie du groupe, c'est-à-dire sa contribution à l'entropie $\alpha$.
+La contribution totale du groupe à l'entropie de la communauté est donc $w_g\sum_s{p_{s|g}\ln_q\frac{1}{p_s}}$, où le poids $w_g$ est ici donné par le nombre d'individus.
+
+```{r}
+Communaute %>% 
+  group_by(Groupe) %>% 
+  summarise(Entropie = sum(Ps)*sum(Psg*lnq(1/Ps, q))) %>% 
+  print ->
+  Partition_entropie
+# Vérification : la somme des contributions
+sum(Partition_entropie$Entropie)
+# égale l'entropie totale
+Tsallis(as.ProbaVector(C), q)
+```
+
+Le passage à la diversité est difficile : la diversité $\gamma$ est l'exponentielle déformée de l'entropie.
+L'exponentielle déformée de la somme des $^{q}_{g}\!H_{\beta}$ n'est pas un produit de termes correspondant à chaque groupe parce que $e^{x+y}_q = e_q^x e^{\frac{y}{1+(1-q)x}}_q$ : le deuxième terme n'est pas indépendant du premier.
+Le cas particulier de l'entropie de Shannon, $q=1$, est différent : la diversité est alors le produit des exponentielles des $^{1}_{g}\!H_{\beta}=w_g\sum_s{p_{s|g}\ln\frac{1}{p_s}}$, mais ce n'est qu'un cas particulier.
+
+
+## Décomposition de la banalité
+
+Comme la banalité de chaque groupe est la moyenne généralisée pondérée des espèces qui le constituent, la banalité $\alpha$ est la moyenne généralisée pondérée des banalités des groupes.
+
+```{r}
+c(Ordinariness(A, q), Ordinariness(B, q)) %>% 
+  power_mean(order=q-1, weights=c(sum(A), sum(B))) %>% 
+  print ->
+  alpha_banalite
+```
+
+La banalité $\alpha$, moyenne des groupes A et B, n'est pas la banalité de la communauté C (appelée $\gamma$): il manque la diversité $\beta$ dans la relation.
+```{r}
+C_banalite
+```
+
+La décomposition est multiplicative : la diversité $\beta$ est le rapport entre la banalité moyenne des groupe et celle de la communauté entière, ou, de façon équivalente, le rapport entre la diversité de la communauté entière et la diversité moyenne des groupes (la diversité est l'inverse de la banalité).
+```{r}
+alpha_banalite/C_banalite
+```
+
+Comme la diversité $\beta$ est le produit de la banalité $\alpha$, moyenne des groupes, et de la diversité $\gamma$, constante, et que la moyenne généralisée est homogène, on peut écrire la diversité $\beta$ comme 
+$$^q\!D_\beta
+  ={\left[\sum_g{w_g}{\left(\frac{1/^q_g\!D_\alpha}{1/^q\!D_\gamma}\right)}^{q-1}\right]}^{\frac{1}{q-1}}.$$
+
+La diversité $\beta$ est donc la moyenne généralisée pondérée des contributions de chaque groupe, égales à leur banalité $\alpha$ divisée par la banalité $\gamma$.
+Impossible d'aller plus loin en regroupant les termes liés à chaque groupe ($\alpha$ et $\beta$) pour définir une contribution totale de chaque groupe.
+
+
+# Conclusion
+
+L'entropie peut être décomposée additivement, par groupes, dont la contribution à l'entropie totale est 
+$$w_g\sum_s{p_{s|g}\ln_q\frac{1}{p_s}}.$$
+La décomposition de la diversité ne permet pas de séparer les contributions des groupes sauf dans le cas de la diversité de Shannon parce que l'exponentielle déformée d'une somme n'est pas le produit des exponentielles.
+
+La banalité peut être décomposée multiplicativement : la banalité totale est le produit de la banalité $\alpha$ et de la diversité $\beta$, chacune étant la moyenne généralisée pondérée de la contribution de chaque groupe mais on ne peut pas regrouper les contributions de chaque groupe dans un terme avec une signification intuitive.
+
+La seule décomposition possible est donc celle de l'entropie.
+Elle pose éventuellement d'autres problèmes : l'impossibilité d'interpréter simplement sa valeur en général et de comparer les entropies d'ordre différents.
